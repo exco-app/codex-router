@@ -1190,6 +1190,8 @@ test("the skill's declared required fields match the app snapshot", () => {
   }
   // And it must not tell a routed model that a routed model slug is invalid.
   assert.doesNotMatch(threadsSkill, /No other top-level keys are allowed/);
+  assert.match(threadsSkill, /fresh-list and use raw `id` \+ `hostId`/);
+  assert.match(threadsSkill, /never create\/fork\/reopen\/handoff\/worktree on miss/);
 });
 
 test("a missing or malformed skill contract is reported as unavailable", () => {
