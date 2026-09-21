@@ -81,6 +81,6 @@ for the distinction between the built-in endpoint override and custom providers.
 - `stream: true` is forced upstream (the edge requires it); non-stream callers
   get the final response object assembled from the SSE stream.
 - One compact Jev decision per request (included in total latency). Tool-loop
-  continuations are re-classified from the active task and latest bounded step
-  evidence, so the model may change between sub-actions. The canonical request
-  and `prompt_cache_key` remain unchanged for the selected model.
+  continuations are re-classified from bounded evidence, but one cache key can
+  only keep or raise its model and effort. The canonical request and
+  `prompt_cache_key` remain unchanged for the selected model.

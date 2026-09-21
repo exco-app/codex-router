@@ -1,7 +1,7 @@
 """Compact Jev contract: independent model and effort choices for the next call."""
 import math
 
-POLICY_VERSION = "split-v3-explicit"
+POLICY_VERSION = "split-v4-cache-aware"
 LUNA, SOL, ASTRA = "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra"
 TIERS = (LUNA, SOL, ASTRA)
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]

@@ -8,12 +8,15 @@
 set -e
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="$(command -v /usr/local/bin/python3 || command -v python3)"
+PYTHON="${JEV_ROUTER_PYTHON:-$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)}"
 LABEL="${JEV_ROUTER_LABEL:-com.thibaultsaintjean.jev-router}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGDIR="$HOME/Library/Logs"
 
-[ -x "$PYTHON" ] || { echo "python3 not found"; exit 1; }
+[ -x "$PYTHON" ] || { echo "Python 3.11+ not found"; exit 1; }
+"$PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' || {
+  echo "Python 3.11+ required (found: $($PYTHON -V 2>&1))"; exit 1;
+}
 mkdir -p "$LOGDIR"
 
 cat > "$PLIST" <<EOF
@@ -24,6 +27,10 @@ cat > "$PLIST" <<EOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/usr/bin/env</string>
+    <string>-i</string>
+    <string>HOME=$HOME</string>
+    <string>PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <string>$PYTHON</string>
     <string>$REPO/server/jev_server.py</string>
   </array>

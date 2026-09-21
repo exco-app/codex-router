@@ -13,13 +13,13 @@ Every pair uses standard speed. Confidence is logged without changing the chosen
 model. There are no keyword/scenario overrides or target model proportions.
 Technical Jev failures remain fail-open to astra @medium and are logged separately.
 
-Per-call routing (v5): every model call is judged independently, so a tool loop
-may move between Luna, Sol and Astra as the next sub-action changes. Provider
-retries inside that call retain its decision. The compact Jev projection is
-judgment input only: the executing model always receives the caller's canonical
-request untouched, never that projection. The caller's prompt_cache_key also
-passes through untouched, allowing each selected model to reuse its own cache
-for this session; caches are not assumed to be shared across different models.
+Cache-aware routing (v6): every model call is judged independently, but the
+served route is monotonic for one prompt_cache_key. A task may rise from Luna to
+Sol to Astra, and may raise its effort, but it never downshifts until a new task
+starts with a new cache key. Provider retries inside a call retain its decision.
+The compact Jev projection is judgment input only: the executing model always
+receives the caller's canonical request untouched, never that projection. The
+caller's prompt_cache_key also passes through untouched.
 Context continuity does not depend on those cache hits: every selected model
 receives the full canonical request. Cache reuse only changes how much of that
 identical prefix the provider must process and bill again.
@@ -75,6 +75,8 @@ import http.client
 import json
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -204,6 +206,15 @@ ENVELOPE_SCAN_CHARS = 200_000
 
 _log_lock = threading.Lock()
 
+# One cache identity, one monotonic route. Switching back to a cheaper model
+# throws away the warm prefix and makes a later upshift pay for it again.
+CACHE_ROUTE_TTL = 24 * 60 * 60
+CACHE_ROUTE_MAX = 256
+_CACHE_ROUTES = {}
+_CACHE_ROUTE_LOCK = threading.Lock()
+_MODEL_RANK = {LUNA: 0, SOL: 1, ASTRA: 2}
+_EFFORT_RANK = {name: index for index, name in enumerate(EFFORTS)}
+
 
 def load_key():
     """TYPESAFE_API_KEY: env files win (the process environment can be stale)."""
@@ -218,7 +229,23 @@ def load_key():
                             return value
         except OSError:
             continue
-    return os.environ.get("TYPESAFE_API_KEY", "").strip()
+    value = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    if value:
+        return value
+    if sys.platform == "darwin":
+        for service, account in (("Typesafe codex", "api-key"),
+                                 ("exco-agent-secrets", "TYPESAFE_API_KEY")):
+            try:
+                result = subprocess.run(
+                    ["security", "find-generic-password", "-s", service,
+                     "-a", account, "-w"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+    return ""
 
 
 def caller_secret():
@@ -634,6 +661,50 @@ def cache_scope(payload, task):
     else:
         source = "task:" + (task or "")
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+
+def _prune_cache_routes(now):
+    for scope in [key for key, value in _CACHE_ROUTES.items()
+                  if value["expires"] <= now]:
+        _CACHE_ROUTES.pop(scope, None)
+    if len(_CACHE_ROUTES) > CACHE_ROUTE_MAX:
+        oldest = sorted(_CACHE_ROUTES, key=lambda key: _CACHE_ROUTES[key]["seen"])
+        for scope in oldest[:len(_CACHE_ROUTES) - CACHE_ROUTE_MAX]:
+            _CACHE_ROUTES.pop(scope, None)
+
+
+def cache_aware_route(scope, model, effort, now=None):
+    """Keep one task on a warm route; allow only capability/effort increases."""
+    if model not in _MODEL_RANK or effort not in _EFFORT_RANK:
+        return model, effort, "bypass", None
+    now = time.time() if now is None else now
+    with _CACHE_ROUTE_LOCK:
+        _prune_cache_routes(now)
+        previous = _CACHE_ROUTES.get(scope)
+        if previous:
+            selected_model = max((previous["model"], model), key=_MODEL_RANK.get)
+            selected_effort = max((previous["effort"], effort), key=_EFFORT_RANK.get)
+            if selected_model != model or selected_effort != effort:
+                action = "prevent_downshift"
+            elif selected_model != previous["model"] or selected_effort != previous["effort"]:
+                action = "upshift"
+            else:
+                action = "hold"
+            prior = {"model": previous["model"], "effort": previous["effort"]}
+        else:
+            selected_model, selected_effort, action, prior = model, effort, "initial", None
+        _CACHE_ROUTES[scope] = {
+            "model": selected_model,
+            "effort": selected_effort,
+            "seen": now,
+            "expires": now + CACHE_ROUTE_TTL,
+        }
+        return selected_model, selected_effort, action, prior
+
+
+def reset_cache_routes():
+    with _CACHE_ROUTE_LOCK:
+        _CACHE_ROUTES.clear()
 
 
 def route_label(model):
@@ -1182,6 +1253,15 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
 
+        proposed_model, proposed_effort = model, effort
+        cache_action = "bypass"
+        previous_route = None
+        if model in TIERS and effort in EFFORTS:
+            model, effort, cache_action, previous_route = cache_aware_route(
+                scope, model, effort)
+            if cache_action == "prevent_downshift":
+                gate += ":cache_hold"
+
         would = None
         if os.path.exists(SHADOW_PATH):
             would = {"model": model, "effort": effort, "speed": speed, "gate": gate}
@@ -1287,8 +1367,12 @@ class Handler(BaseHTTPRequestHandler):
             "speed": speed,
             "native": native_model,
             "dry": dry_reason,
-            "routing_scope": "call",
+            "routing_scope": "cache-aware-call",
             "cache_scope": scope,
+            "cache_action": cache_action,
+            "previous_route": previous_route,
+            "proposed_model": proposed_model,
+            "proposed_effort": proposed_effort,
             "cache_key_present": isinstance(payload.get("prompt_cache_key"), str)
                                  and bool(payload["prompt_cache_key"].strip()),
             "retried": retried,

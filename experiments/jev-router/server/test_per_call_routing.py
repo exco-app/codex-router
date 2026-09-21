@@ -1,10 +1,10 @@
-"""Per-call routing keeps Jev's view compact and the executor's replay complete.
+"""Cache-aware routing keeps Jev's view compact and the executor's replay complete.
 
 The contract pinned here is:
 
 1. every model call, including tool continuations and post-compaction calls,
    gets a fresh Jev decision;
-2. different sub-actions may therefore use different models;
+2. a task may upshift, but never downshift and re-warm an earlier model;
 3. the canonical Responses request and prompt_cache_key are preserved for the
    selected model; the compact Jev dossier never becomes execution context;
 4. cache telemetry identifies a session only by a non-reversible local hash.
@@ -112,6 +112,7 @@ class CacheScope(unittest.TestCase):
 class PerCallEndToEnd(unittest.TestCase):
     def setUp(self):
         Edge.payloads = []
+        jev.reset_cache_routes()
         tmp = self.enterContext(tempfile.TemporaryDirectory())
         for name in ("OFF_PATH", "SHADOW_PATH", "DEBUG_PATH", "SIGNATURE_PATH",
                      "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH"):
@@ -140,6 +141,7 @@ class PerCallEndToEnd(unittest.TestCase):
         for server in (self.server, self.edge):
             server.shutdown()
             server.server_close()
+        jev.reset_cache_routes()
 
     def call(self, payload):
         self.logged.clear()
@@ -153,7 +155,7 @@ class PerCallEndToEnd(unittest.TestCase):
         self.assertTrue(self.logged.wait(3), "wait for the call's log record")
         return result
 
-    def test_each_sub_action_is_decided_and_can_swap_model(self):
+    def test_each_sub_action_is_decided_but_route_only_moves_up(self):
         opening = [message("user", "run the tests and fix what breaks")]
         choices = [
             answer(jev.LUNA, "low"),
@@ -169,9 +171,14 @@ class PerCallEndToEnd(unittest.TestCase):
         self.assertEqual(judge.call_count, 4)
         self.assertEqual(
             [p["model"] for p in Edge.payloads],
-            [jev.LUNA, jev.SOL, jev.LUNA, jev.ASTRA],
+            [jev.LUNA, jev.SOL, jev.SOL, jev.ASTRA],
         )
-        self.assertEqual([r["routing_scope"] for r in self.records], ["call"] * 4)
+        self.assertEqual(
+            [r["cache_action"] for r in self.records],
+            ["initial", "upshift", "prevent_downshift", "upshift"],
+        )
+        self.assertEqual(
+            [r["routing_scope"] for r in self.records], ["cache-aware-call"] * 4)
         self.assertEqual(len({r["cache_scope"] for r in self.records}), 1)
 
     def test_compaction_gets_a_new_decision_and_full_handoff(self):
@@ -187,7 +194,7 @@ class PerCallEndToEnd(unittest.TestCase):
             self.call(payload_for(opening))
             self.call(payload_for(compacted))
         self.assertEqual(judge.call_count, 2)
-        self.assertEqual([p["model"] for p in Edge.payloads], [jev.SOL, jev.LUNA])
+        self.assertEqual([p["model"] for p in Edge.payloads], [jev.SOL, jev.SOL])
         self.assertEqual(Edge.payloads[-1]["input"], compacted)
 
     def test_compact_projection_never_becomes_execution_context(self):

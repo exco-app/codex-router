@@ -2,11 +2,12 @@
 
 [![ci](https://github.com/0xNatoshi/jev-codex-router/actions/workflows/ci.yml/badge.svg)](https://github.com/0xNatoshi/jev-codex-router/actions/workflows/ci.yml)
 
-**Per-call model routing for Codex, driven by [Jev](https://docs.typesafe.ai) (TypeSafe System One).**
+**Cache-aware model routing for Codex, driven by [Jev](https://docs.typesafe.ai) (TypeSafe System One).**
 
-Jev chooses a model and thinking effort together for each model call, including
-continuations after tools. Every route uses standard speed. The objective is
-sufficient capability for the next decision with no unnecessary quota consumption.
+Jev chooses a model and thinking effort for each model call, including
+continuations after tools. Within one Codex task, code allows only monotonic
+upshifts (Luna → Sol → Astra and low → max), so a cheap sub-action cannot discard
+a warmer, stronger model cache that the task may need again.
 
 **Historical simulation: ≈ −60 % vs full Astra** on 237 turns under the old
 policy. This is not measured Codex quota saved, nor evidence for the current
@@ -67,7 +68,8 @@ and bypass modes.
 
 There is no preferred model, target distribution, keyword-to-model rule,
 low-confidence fallback to Sol, mechanical-step exception, or compaction pin.
-A valid pair of decisions is applied unchanged even when options are close.
+A valid pair is the proposal; code changes it only when applying that proposal
+would downshift the model or effort already warming this task's cache.
 Jev's conservative combined confidence and both choice distributions are logged
 separately; neither is a measured probability that the selected model will
 successfully finish the task.
@@ -163,9 +165,10 @@ Their logged Fast speed retains its surcharge instead of being repriced by the
 new policy. The old backtest is clearly labelled as a simulation. Current replay
 scripts share the live decision contract and reject a cache from another policy.
 
-Routing is call-scoped: every user call, tool continuation and post-compaction
-call gets a fresh Jev decision, so the serving model may change between
-sub-actions. Provider retries inside one call retain that call's decision. Jev
+Every user call, tool continuation and post-compaction call gets a fresh Jev
+decision, but the route attached to one `prompt_cache_key` can only stay put or
+rise. A new Codex task gets a new cache key and a fresh initial route. Provider
+retries inside one call retain that call's decision. Jev
 receives only a bounded decision dossier: active task, step type, and—when
 relevant—a short assistant-intent tail, tool name, tool-output tail or image
 flag. Short context-dependent asks such as `continue` also receive one bounded
@@ -177,21 +180,14 @@ streaming flag changed.
 Context continuity is unconditional: every selected model receives the complete
 canonical request, so a cache miss can increase processed input but can never
 remove conversation facts. Cache controls (`prompt_cache_key` and
-`prompt_cache_options`) are forwarded unchanged. GPT-5.6+ automatically caches
-the stable rendered prefix separately for each model: the first arrival on a
-model may be cold, while a later return can reuse that model's earlier prefix.
-There is no cross-model KV-cache handoff, because those tensors belong to the
-weights of the model that produced them
+`prompt_cache_options`) are forwarded unchanged. There is no cross-model
+KV-cache handoff, because those tensors belong to the weights of the model that
+produced them. A capability upshift therefore pays one cold transition; a
+downshift followed by an upshift would pay avoidable transitions, which the
+monotonic guard prevents
 ([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)).
 The report hashes session ids before logging them and shows actual
-`cached_input_tokens` by model, including cache hits immediately after a switch
-and when returning to a previously used model.
-
-In one observed 32k-token tool loop, Sol → Luna reused 24,832 Luna-cached tokens,
-the return to Sol reused 25,216 Sol-cached tokens, and the next Luna call reused
-its same 24,832-token prefix. This is the intended behavior: complete logical
-context on every call, with one independently warming cache per model rather
-than repeated full re-contextualization.
+`cached_input_tokens` by model plus every proposed route the guard held back.
 
 ## Ask surface (`POST /ask`)
 
